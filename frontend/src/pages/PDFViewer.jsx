@@ -430,7 +430,12 @@ function PDFViewer() {
                     boxShadow: '0 1px 3px rgba(0,0,0,0.1)',
                     backgroundColor: pageNumber === highlight.page ? '#f8f9fa' : 'white'
                   }}
-                  onClick={() => navigateToHighlight(highlight)}
+                  onClick={(e) => {
+                    // Only navigate if the click wasn't on a button
+                    if (!e.target.closest('.btn')) {
+                      navigateToHighlight(highlight);
+                    }
+                  }}
                 >
                   <div className="d-flex justify-content-between align-items-start">
                     <div className="flex-grow-1">
@@ -488,6 +493,7 @@ function PDFViewer() {
                         size="sm"
                         className="text-danger p-0"
                         onClick={(e) => {
+                          e.preventDefault();
                           e.stopPropagation();
                           handleDeleteHighlight(highlight._id);
                         }}
