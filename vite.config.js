@@ -13,5 +13,9 @@ export default defineConfig({
         manualChunks: undefined
       }
     }
+  },
+  server: {
+    historyApiFallback: true,
+    port: 3000
   }
 }) 
