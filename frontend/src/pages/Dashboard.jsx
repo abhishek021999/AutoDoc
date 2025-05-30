@@ -179,9 +179,9 @@ function Dashboard() {
       <Card className="mb-4">
         <Card.Body>
           <Form onSubmit={handleUpload}>
-            <Row className="align-items-end">
-              <Col md={8}>
-                <Form.Group>
+            <div className="d-flex gap-3">
+              <div className="flex-grow-1">
+                <Form.Group className="mb-0">
                   <Form.Label>Upload PDF (Max size: 10MB)</Form.Label>
                   <Form.Control
                     type="file"
@@ -189,14 +189,14 @@ function Dashboard() {
                     onChange={handleFileChange}
                     required
                   />
-                  {selectedFile && (
-                    <Form.Text className="text-muted">
-                      Selected file: {selectedFile.name} ({formatFileSize(selectedFile.size)})
-                    </Form.Text>
-                  )}
                 </Form.Group>
-              </Col>
-              <Col md={4}>
+                {selectedFile && (
+                  <Form.Text className="text-muted">
+                    Selected file: {selectedFile.name} ({formatFileSize(selectedFile.size)})
+                  </Form.Text>
+                )}
+              </div>
+              <div style={{ width: '200px', marginTop: '32px' }}>
                 <Button
                   type="submit"
                   variant="primary"
@@ -205,8 +205,8 @@ function Dashboard() {
                 >
                   {uploading ? `Uploading... ${uploadProgress}%` : 'Upload'}
                 </Button>
-              </Col>
-            </Row>
+              </div>
+            </div>
             {uploading && (
               <div className="mt-3">
                 <div className="progress">
