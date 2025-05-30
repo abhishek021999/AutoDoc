@@ -27,7 +27,8 @@ function Dashboard() {
       );
       setPdfs(sortedPdfs.slice(0, 1));
     } catch (err) {
-      toast.error('Failed to fetch PDFs');
+      console.error('Error fetching PDFs:', err);
+      toast.error('Failed to fetch PDFs. Please try refreshing the page.');
     } finally {
       setLoading(false);
     }
@@ -75,7 +76,11 @@ function Dashboard() {
       setSelectedFile(null);
       e.target.reset();
       toast.success('PDF uploaded successfully');
-      fetchPdfs();
+      
+      // Add a small delay before fetching PDFs to allow backend processing
+      setTimeout(() => {
+        fetchPdfs();
+      }, 1000);
     } catch (err) {
       toast.error(err.response?.data?.message || 'Failed to upload PDF');
     } finally {
