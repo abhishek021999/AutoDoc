@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Container, Row, Col, Card, Button, Form, Alert, Badge } from 'react-bootstrap';
+import { Container, Row, Col, Card, Button, Form, Badge } from 'react-bootstrap';
+import { ToastContainer, toast } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
 import axios from 'axios';
 
 function Dashboard() {
   const [pdfs, setPdfs] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const [selectedFile, setSelectedFile] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -21,9 +22,12 @@ function Dashboard() {
       const response = await axios.get(`${import.meta.env.VITE_API_URL}/api/pdfs`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      setPdfs(response.data);
+      const sortedPdfs = response.data.sort((a, b) => 
+        new Date(b.createdAt) - new Date(a.createdAt)
+      );
+      setPdfs(sortedPdfs.slice(0, 1));
     } catch (err) {
-      setError('Failed to fetch PDFs');
+      toast.error('Failed to fetch PDFs');
     } finally {
       setLoading(false);
     }
@@ -31,16 +35,17 @@ function Dashboard() {
 
   const handleFileChange = (e) => {
     const file = e.target.files[0];
-    if (file) {
-      // Check file size (10MB limit)
+    if (file && file.type === 'application/pdf') {
       if (file.size > 10 * 1024 * 1024) {
-        setError('File size must be less than 10MB');
+        toast.error('File size must be less than 10MB');
         setSelectedFile(null);
         e.target.value = null;
         return;
       }
       setSelectedFile(file);
-      setError('');
+    } else {
+      toast.error('Please select a valid PDF file');
+      setSelectedFile(null);
     }
   };
 
@@ -50,6 +55,7 @@ function Dashboard() {
 
     setUploading(true);
     setUploadProgress(0);
+
     const formData = new FormData();
     formData.append('pdf', selectedFile);
 
@@ -57,7 +63,7 @@ function Dashboard() {
       const token = localStorage.getItem('token');
       await axios.post(`${import.meta.env.VITE_API_URL}/api/pdfs/upload`, formData, {
         headers: {
-          Authorization: `Bearer ${token}`,
+          'Authorization': `Bearer ${token}`,
           'Content-Type': 'multipart/form-data'
         },
         onUploadProgress: (progressEvent) => {
@@ -65,10 +71,13 @@ function Dashboard() {
           setUploadProgress(progress);
         }
       });
+
       setSelectedFile(null);
+      e.target.reset();
+      toast.success('PDF uploaded successfully');
       fetchPdfs();
     } catch (err) {
-      setError('Failed to upload PDF');
+      toast.error(err.response?.data?.message || 'Failed to upload PDF');
     } finally {
       setUploading(false);
       setUploadProgress(0);
@@ -76,17 +85,49 @@ function Dashboard() {
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm('Are you sure you want to delete this PDF?')) return;
+    const pdfToDelete = pdfs.find(pdf => pdf._id === id);
+    if (!pdfToDelete) return;
 
-    try {
-      const token = localStorage.getItem('token');
-      await axios.delete(`${import.meta.env.VITE_API_URL}/api/pdfs/${id}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      fetchPdfs();
-    } catch (err) {
-      setError('Failed to delete PDF');
-    }
+    toast.info(
+      <div>
+        <p>Are you sure you want to delete "{pdfToDelete.title}"?</p>
+        <div className="d-flex justify-content-end gap-2 mt-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => toast.dismiss()}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={async () => {
+              toast.dismiss();
+              try {
+                const token = localStorage.getItem('token');
+                await axios.delete(`${import.meta.env.VITE_API_URL}/api/pdfs/${id}`, {
+                  headers: { Authorization: `Bearer ${token}` }
+                });
+                toast.success(`"${pdfToDelete.title}" has been deleted successfully`);
+                fetchPdfs();
+              } catch (err) {
+                toast.error('Failed to delete PDF');
+              }
+            }}
+          >
+            Delete
+          </Button>
+        </div>
+      </div>,
+      {
+        position: "top-center",
+        autoClose: false,
+        closeOnClick: false,
+        draggable: false,
+        closeButton: false
+      }
+    );
   };
 
   const formatFileSize = (bytes) => {
@@ -95,14 +136,6 @@ function Dashboard() {
     const sizes = ['Bytes', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
-  };
-
-  const formatDate = (date) => {
-    return new Date(date).toLocaleDateString('en-US', {
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric'
-    });
   };
 
   if (loading) {
@@ -119,17 +152,24 @@ function Dashboard() {
 
   return (
     <Container>
+      <ToastContainer
+        position="top-right"
+        autoClose={3000}
+        hideProgressBar={false}
+        newestOnTop
+        closeOnClick
+        rtl={false}
+        pauseOnFocusLoss
+        draggable
+        pauseOnHover
+        theme="light"
+      />
+
       <Row className="mb-4">
         <Col>
-          <h2 className="mb-4">My PDF Library</h2>
+          <h2 className="mb-4">Recent Upload</h2>
         </Col>
       </Row>
-
-      {error && (
-        <Alert variant="danger" className="mb-4">
-          {error}
-        </Alert>
-      )}
 
       <Card className="mb-4">
         <Card.Body>
@@ -182,9 +222,9 @@ function Dashboard() {
         </Card.Body>
       </Card>
 
-      <Row>
+      <Row className="justify-content-center">
         {pdfs.map((pdf) => (
-          <Col key={pdf._id} md={4} className="mb-4">
+          <Col key={pdf._id} md={6} lg={4} className="mb-4">
             <Card className="h-100 shadow-sm">
               <Card.Body>
                 <div className="text-center mb-3">
@@ -194,15 +234,16 @@ function Dashboard() {
                   <Card.Title className="text-truncate">{pdf.title}</Card.Title>
                 </div>
                 <Card.Text>
-                  <small className="text-muted d-block mb-2">
-                    Uploaded: {formatDate(pdf.createdAt)}
-                  </small>
-                  <Badge bg="info" className="me-2">
-                    {formatFileSize(pdf.size || 0)}
-                  </Badge>
-                  <Badge bg="secondary">
-                    {pdf.pageCount} pages
-                  </Badge>
+                  <div className="d-flex justify-content-between align-items-center">
+                    <small className="text-muted">
+                      {new Date(pdf.createdAt).toLocaleDateString()}
+                    </small>
+                    <div>
+                      <Badge bg="secondary" className="me-2">
+                        {formatFileSize(pdf.size)}
+                      </Badge>
+                    </div>
+                  </div>
                 </Card.Text>
                 <div className="d-flex gap-2 mt-3">
                   <Button
@@ -229,13 +270,11 @@ function Dashboard() {
       </Row>
 
       {pdfs.length === 0 && (
-        <Alert variant="info">
-          <div className="text-center py-4">
-            <i className="bi bi-file-earmark-pdf text-primary" style={{ fontSize: '3rem' }}></i>
-            <h4 className="mt-3">Your library is empty</h4>
-            <p className="mb-0">Upload your first PDF using the form above.</p>
-          </div>
-        </Alert>
+        <div className="text-center py-5">
+          <i className="bi bi-file-earmark-pdf text-primary" style={{ fontSize: '3rem' }}></i>
+          <h4 className="mt-3">No recent uploads</h4>
+          <p className="mb-0">Upload your first PDF using the form above.</p>
+        </div>
       )}
     </Container>
   );

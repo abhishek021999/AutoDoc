@@ -1,6 +1,7 @@
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { Navbar as BootstrapNavbar, Nav, Container, Button } from 'react-bootstrap';
 import { useState, useEffect, createContext, useContext } from 'react';
+import { useTheme } from '../context/ThemeContext';
 
 // Create UserContext
 export const UserContext = createContext();
@@ -50,29 +51,70 @@ export function UserProvider({ children }) {
 
 function Navbar() {
   const { user, isAuthenticated, logout } = useContext(UserContext);
+  const { isDarkMode, toggleTheme } = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const handleLogout = () => {
     logout();
     navigate('/');
   };
 
+  const isActive = (path) => {
+    return location.pathname === path;
+  };
+
   return (
-    <BootstrapNavbar bg="primary" variant="dark" expand="lg" className="mb-4">
+    <BootstrapNavbar 
+      bg="primary" 
+      variant="dark" 
+      expand="lg" 
+      fixed="top"
+      style={{
+        boxShadow: '0 2px 4px rgba(0,0,0,0.1)',
+        zIndex: 1030
+      }}
+    >
       <Container>
         <BootstrapNavbar.Brand as={Link} to="/">AutoDoc</BootstrapNavbar.Brand>
         <BootstrapNavbar.Toggle aria-controls="basic-navbar-nav" />
         <BootstrapNavbar.Collapse id="basic-navbar-nav">
           <Nav className="me-auto">
-            <Nav.Link as={Link} to="/">Home</Nav.Link>
+            <Nav.Link 
+              as={Link} 
+              to="/" 
+              className={isActive('/') ? 'active fw-bold' : ''}
+            >
+              Home
+            </Nav.Link>
             {isAuthenticated && (
               <>
-                <Nav.Link as={Link} to="/dashboard">Dashboard</Nav.Link>
-                <Nav.Link as={Link} to="/library">Library</Nav.Link>
+                <Nav.Link 
+                  as={Link} 
+                  to="/dashboard" 
+                  className={isActive('/dashboard') ? 'active fw-bold' : ''}
+                >
+                  Dashboard
+                </Nav.Link>
+                <Nav.Link 
+                  as={Link} 
+                  to="/library" 
+                  className={isActive('/library') ? 'active fw-bold' : ''}
+                >
+                  Library
+                </Nav.Link>
               </>
             )}
           </Nav>
           <Nav>
+            <Button
+              variant="outline-light"
+              className="me-3"
+              onClick={toggleTheme}
+              title={isDarkMode ? "Switch to Light Mode" : "Switch to Dark Mode"}
+            >
+              <i className={`bi bi-${isDarkMode ? 'sun' : 'moon'}-fill`}></i>
+            </Button>
             {isAuthenticated ? (
               <>
                 <span className="navbar-text me-3 d-flex align-items-center" style={{ color: 'white' }}>
@@ -86,8 +128,20 @@ function Navbar() {
               </>
             ) : (
               <>
-                <Nav.Link as={Link} to="/login">Login</Nav.Link>
-                <Nav.Link as={Link} to="/register">Register</Nav.Link>
+                <Nav.Link 
+                  as={Link} 
+                  to="/login"
+                  className={isActive('/login') ? 'active fw-bold' : ''}
+                >
+                  Login
+                </Nav.Link>
+                <Nav.Link 
+                  as={Link} 
+                  to="/register"
+                  className={isActive('/register') ? 'active fw-bold' : ''}
+                >
+                  Register
+                </Nav.Link>
               </>
             )}
           </Nav>

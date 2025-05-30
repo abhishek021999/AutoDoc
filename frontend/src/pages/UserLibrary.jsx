@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
-import { Container, Row, Col, Card, Button, Form, Alert, Badge, InputGroup } from 'react-bootstrap';
+import { Container, Row, Col, Card, Button, Form, Badge, InputGroup } from 'react-bootstrap';
+import { ToastContainer, toast } from 'react-toastify';
+import 'react-toastify/dist/ReactToastify.css';
 import axios from 'axios';
 
 function UserLibrary() {
   const [pdfs, setPdfs] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [sortBy, setSortBy] = useState('uploadDate');
   const [sortOrder, setSortOrder] = useState('desc');
@@ -23,24 +24,56 @@ function UserLibrary() {
       });
       setPdfs(response.data);
     } catch (err) {
-      setError('Failed to fetch PDFs');
+      toast.error('Failed to fetch PDFs');
     } finally {
       setLoading(false);
     }
   };
 
   const handleDelete = async (id) => {
-    if (!window.confirm('Are you sure you want to delete this PDF?')) return;
+    const pdfToDelete = pdfs.find(pdf => pdf._id === id);
+    if (!pdfToDelete) return;
 
-    try {
-      const token = localStorage.getItem('token');
-      await axios.delete(`${import.meta.env.VITE_API_URL}/api/pdfs/${id}`, {
-        headers: { Authorization: `Bearer ${token}` }
-      });
-      fetchPdfs();
-    } catch (err) {
-      setError('Failed to delete PDF');
-    }
+    toast.info(
+      <div>
+        <p>Are you sure you want to delete "{pdfToDelete.title}"?</p>
+        <div className="d-flex justify-content-end gap-2 mt-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => toast.dismiss()}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={async () => {
+              toast.dismiss();
+              try {
+                const token = localStorage.getItem('token');
+                await axios.delete(`${import.meta.env.VITE_API_URL}/api/pdfs/${id}`, {
+                  headers: { Authorization: `Bearer ${token}` }
+                });
+                toast.success(`"${pdfToDelete.title}" has been deleted successfully`);
+                fetchPdfs();
+              } catch (err) {
+                toast.error('Failed to delete PDF');
+              }
+            }}
+          >
+            Delete
+          </Button>
+        </div>
+      </div>,
+      {
+        position: "top-center",
+        autoClose: false,
+        closeOnClick: false,
+        draggable: false,
+        closeButton: false
+      }
+    );
   };
 
   const formatFileSize = (bytes) => {
@@ -95,17 +128,24 @@ function UserLibrary() {
 
   return (
     <Container>
+      <ToastContainer
+        position="top-right"
+        autoClose={3000}
+        hideProgressBar={false}
+        newestOnTop
+        closeOnClick
+        rtl={false}
+        pauseOnFocusLoss
+        draggable
+        pauseOnHover
+        theme="light"
+      />
+      
       <Row className="mb-4">
         <Col>
           <h2 className="mb-4">My Library</h2>
         </Col>
       </Row>
-
-      {error && (
-        <Alert variant="danger" className="mb-4">
-          {error}
-        </Alert>
-      )}
 
       <Card className="mb-4">
         <Card.Body>
@@ -166,9 +206,6 @@ function UserLibrary() {
                     <Badge bg="info">
                       {formatFileSize(pdf.size)}
                     </Badge>
-                    <Badge bg="secondary">
-                      {pdf.pageCount} pages
-                    </Badge>
                   </div>
                 </Card.Text>
                 <div className="d-flex gap-2 mt-3">
@@ -198,29 +235,27 @@ function UserLibrary() {
       </Row>
 
       {filteredAndSortedPdfs.length === 0 && (
-        <Alert variant="info">
-          <div className="text-center py-4">
-            <i className="bi bi-file-earmark-pdf text-primary" style={{ fontSize: '3rem' }}></i>
-            <h4 className="mt-3">
-              {searchTerm ? 'No matching PDFs found' : 'Your library is empty'}
-            </h4>
-            <p className="mb-0">
-              {searchTerm 
-                ? 'Try adjusting your search terms'
-                : 'Upload your first PDF from the dashboard'}
-            </p>
-            {!searchTerm && (
-              <Button
-                as={Link}
-                to="/dashboard"
-                variant="primary"
-                className="mt-3"
-              >
-                Go to Dashboard
-              </Button>
-            )}
-          </div>
-        </Alert>
+        <div className="text-center py-5">
+          <i className="bi bi-file-earmark-pdf text-primary" style={{ fontSize: '3rem' }}></i>
+          <h4 className="mt-3">
+            {searchTerm ? 'No matching PDFs found' : 'Your library is empty'}
+          </h4>
+          <p className="mb-0">
+            {searchTerm 
+              ? 'Try adjusting your search terms'
+              : 'Upload your first PDF from the dashboard'}
+          </p>
+          {!searchTerm && (
+            <Button
+              as={Link}
+              to="/dashboard"
+              variant="primary"
+              className="mt-3"
+            >
+              Go to Dashboard
+            </Button>
+          )}
+        </div>
       )}
     </Container>
   );

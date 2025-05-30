@@ -6,20 +6,21 @@ const { s3Client, bucketName, getS3Url, getCorsHeaders } = require('../config/s3
 const PDF = require('../models/PDF');
 const auth = require('../middleware/auth');
 const mongoose = require('mongoose');
+const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 
 const router = express.Router();
+
+// Debug middleware to log all requests
+router.use((req, res, next) => {
+  console.log(`${req.method} ${req.originalUrl}`);
+  next();
+});
 
 // Add CORS middleware
 router.use((req, res, next) => {
   Object.entries(getCorsHeaders()).forEach(([key, value]) => {
     res.setHeader(key, value);
   });
-  next();
-});
-
-// Debug middleware to log all requests
-router.use((req, res, next) => {
-  console.log(`${req.method} ${req.originalUrl}`);
   next();
 });
 
@@ -91,6 +92,11 @@ router.post('/upload', auth, upload.single('pdf'), async (req, res) => {
       await s3Client.send(new PutObjectCommand(uploadParams));
       console.log('File uploaded to S3 successfully');
 
+      // Get page count from the PDF
+      const loadedPdf = await PDFDocument.load(file.buffer);
+      const pageCount = loadedPdf.getPageCount();
+      console.log('PDF page count:', pageCount);
+
       // Generate a signed URL for the uploaded file
       const signedUrl = await generateSignedUrl(key);
       if (!signedUrl) {
@@ -104,6 +110,7 @@ router.post('/upload', auth, upload.single('pdf'), async (req, res) => {
         storagePath: key,
         user: req.user.id,
         size: file.size,
+        pageCount: pageCount,
         uploadDate: new Date()
       });
 
@@ -181,6 +188,570 @@ router.get('/', auth, async (req, res) => {
     });
   }
 });
+
+// Export PDF with annotations
+router.get('/:id/export', auth, async (req, res) => {
+  try {
+    console.log('Starting PDF export for ID:', req.params.id);
+    
+    // Check if S3 is configured
+    if (!bucketName || !process.env.AWS_REGION || !process.env.AWS_ACCESS_KEY_ID || !process.env.AWS_SECRET_ACCESS_KEY) {
+      console.error('S3 configuration is missing:', {
+        bucketName: !!bucketName,
+        region: !!process.env.AWS_REGION,
+        accessKey: !!process.env.AWS_ACCESS_KEY_ID,
+        secretKey: !!process.env.AWS_SECRET_ACCESS_KEY
+      });
+      return res.status(500).json({ 
+        message: 'Storage configuration is missing. Please contact the administrator.',
+        error: 'S3_CONFIG_MISSING'
+      });
+    }
+    
+    const pdf = await PDF.findById(req.params.id);
+    if (!pdf) {
+      console.log('PDF not found with ID:', req.params.id);
+      return res.status(404).json({ message: 'PDF not found' });
+    }
+
+    console.log('Found PDF:', {
+      id: pdf._id,
+      title: pdf.title,
+      storagePath: pdf.storagePath,
+      highlightsCount: pdf.highlights?.length || 0
+    });
+
+    if (!pdf.storagePath) {
+      console.error('PDF has no storage path:', pdf._id);
+      return res.status(400).json({ 
+        message: 'PDF has no storage path',
+        error: 'STORAGE_PATH_MISSING'
+      });
+    }
+
+    try {
+      // Get the PDF from S3
+      const command = new GetObjectCommand({
+        Bucket: bucketName,
+        Key: pdf.storagePath,
+      });
+
+      console.log('Fetching PDF from S3:', {
+        bucket: bucketName,
+        key: pdf.storagePath
+      });
+
+      const response = await s3Client.send(command);
+      console.log('Successfully fetched PDF from S3');
+      
+      const pdfBytes = await response.Body.transformToByteArray();
+      console.log('Transformed PDF to byte array, size:', pdfBytes.length);
+      
+      // Load the PDF document
+      console.log('Loading PDF document...');
+      const pdfDoc = await PDFDocument.load(pdfBytes);
+      const pages = pdfDoc.getPages();
+      console.log('PDF loaded successfully, pages:', pages.length);
+      
+      // Embed fonts
+      const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      console.log('Fonts embedded successfully');
+
+      // Process each page
+      for (let i = 0; i < pages.length; i++) {
+        try {
+          const page = pages[i];
+          const { width, height } = page.getSize();
+          
+          // Get highlights for this page
+          const pageHighlights = pdf.highlights.filter(h => h.page === i + 1);
+          
+          // Process highlights first
+          pageHighlights.forEach((highlight, index) => {
+            try {
+              // Get the text content and position from the original PDF
+              const textContent = highlight.text;
+              
+              // Calculate highlight position based on the text selection
+              const textPosition = {
+                x: 50 + (highlight.start * 0.1),
+                y: height - (highlight.start * 0.1),
+                width: (highlight.end - highlight.start) * 0.1,
+                height: 20
+              };
+
+              // Create proper PDF highlight annotation
+              const color = highlight.color || 'yellow';
+              const rgbColor = getRGBColor(color);
+              
+              // First draw the highlight rectangle
+              page.drawRectangle({
+                x: textPosition.x,
+                y: textPosition.y - 2,
+                width: textPosition.width,
+                height: textPosition.height + 4,
+                color: rgbColor,
+                opacity: 0.3,
+                borderColor: rgbColor,
+                borderWidth: 1
+              });
+
+              // Then draw the text on top of the highlight
+              page.drawText(textContent, {
+                x: textPosition.x,
+                y: textPosition.y + 4,
+                size: 12,
+                color: rgb(0, 0, 0),
+                font: helveticaBold,
+                maxWidth: textPosition.width
+              });
+
+              // If there's a comment, draw it right after the highlighted text
+              if (highlight.comment) {
+                const footnoteNumber = index + 1;
+                page.drawText(`${footnoteNumber}.`, {
+                  x: textPosition.x - 5,
+                  y: textPosition.y + 4,
+                  size: 12,
+                  color: rgb(0, 0, 0),
+                  font: helveticaBold
+                });
+
+                page.drawText(`: ${highlight.comment}`, {
+                  x: textPosition.x + textPosition.width + 5,
+                  y: textPosition.y + 4,
+                  size: 12,
+                  color: rgb(0, 0, 0),
+                  font: helveticaFont
+                });
+              }
+            } catch (highlightError) {
+              console.error('Error processing highlight:', highlightError);
+            }
+          });
+
+          // Add footnotes at the bottom of the page content
+          if (pageHighlights.some(h => h.comment)) {
+            try {
+              // Calculate the starting Y position for footnotes
+              // Start from the bottom of the page content (approximately 100 units from bottom)
+              const footerStartY = 150; // Increased distance from bottom
+              const footerX = 50;
+              const margin = 50;
+              
+              // Draw a thicker separator line
+              page.drawLine({
+                start: { x: margin, y: footerStartY + 20 },
+                end: { x: width - margin, y: footerStartY + 20 },
+                thickness: 1.5, // Increased thickness
+                color: rgb(0.2, 0.2, 0.2) // Darker color for better visibility
+              });
+
+              // Add "Footnotes" header with improved visibility
+              page.drawText('Footnotes:', {
+                x: footerX,
+                y: footerStartY,
+                size: 14,
+                color: rgb(0, 0, 0),
+                font: helveticaBold
+              });
+
+              // Add each footnote in a clear format
+              let currentY = footerStartY - 30; // Increased spacing after header
+              pageHighlights.forEach((highlight, index) => {
+                if (highlight.comment) {
+                  const footnoteNumber = index + 1;
+                  const highlightColor = getRGBColor(highlight.color || 'yellow');
+                  
+                  // Draw the footnote number and highlighted text
+                  page.drawText(`${footnoteNumber}. ${highlight.text}:`, {
+                    x: footerX,
+                    y: currentY,
+                    size: 12,
+                    color: highlightColor,
+                    font: helveticaBold,
+                    maxWidth: width - 100
+                  });
+                  
+                  // Draw the comment on the next line, indented
+                  page.drawText(highlight.comment, {
+                    x: footerX + 20, // Indent the comment
+                    y: currentY - 20, // Move down for the comment
+                    size: 12,
+                    color: rgb(0, 0, 0),
+                    font: helveticaFont,
+                    maxWidth: width - 120
+                  });
+                  
+                  currentY -= 50; // Increased spacing between footnotes
+                }
+              });
+
+              // Add page number at the very bottom
+              page.drawText(`Page ${i + 1} of ${pages.length}`, {
+                x: width - 100,
+                y: margin,
+                size: 9,
+                color: rgb(0.5, 0.5, 0.5),
+                font: helveticaFont
+              });
+            } catch (footnoteError) {
+              console.error('Error adding footnotes:', footnoteError);
+            }
+          }
+        } catch (pageError) {
+          console.error('Error processing page:', pageError);
+        }
+      }
+
+      // Save the modified PDF
+      console.log('Saving modified PDF with embedded highlights...');
+      const modifiedPdfBytes = await pdfDoc.save({
+        useObjectStreams: false,
+        addDefaultPage: false,
+        preserveEditability: true
+      });
+      console.log('PDF saved successfully, size:', modifiedPdfBytes.length);
+      
+      // Set response headers
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${pdf.title.replace('.pdf', '')}_annotated.pdf"`);
+      
+      // Send the modified PDF
+      console.log('Sending PDF response...');
+      res.send(Buffer.from(modifiedPdfBytes));
+      console.log('PDF export completed successfully');
+    } catch (s3Error) {
+      console.error('S3 operation failed:', {
+        error: s3Error.message,
+        stack: s3Error.stack,
+        code: s3Error.code
+      });
+      return res.status(500).json({ 
+        message: 'Failed to access PDF storage',
+        error: 'S3_OPERATION_FAILED',
+        details: s3Error.message
+      });
+    }
+  } catch (error) {
+    console.error('Error exporting PDF:', error);
+    res.status(500).json({ 
+      message: 'Error exporting PDF',
+      error: error.message 
+    });
+  }
+});
+
+// Generate annotated PDF
+router.post('/:id/generate-annotated', auth, async (req, res) => {
+  try {
+    console.log('Generating annotated PDF for ID:', req.params.id);
+    
+    const pdf = await PDF.findById(req.params.id);
+    if (!pdf) {
+      console.log('PDF not found with ID:', req.params.id);
+      return res.status(404).json({ message: 'PDF not found' });
+    }
+
+    if (!pdf.storagePath) {
+      console.error('PDF has no storage path:', pdf._id);
+      return res.status(400).json({ 
+        message: 'PDF has no storage path',
+        error: 'STORAGE_PATH_MISSING'
+      });
+    }
+
+    try {
+      // Get the PDF from S3
+      const command = new GetObjectCommand({
+        Bucket: bucketName,
+        Key: pdf.storagePath,
+      });
+
+      const response = await s3Client.send(command);
+      const pdfBytes = await response.Body.transformToByteArray();
+      
+      // Load the PDF document
+      const pdfDoc = await PDFDocument.load(pdfBytes);
+      const pages = pdfDoc.getPages();
+      
+      // Embed fonts
+      const helveticaFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+
+      // Process each page
+      for (let i = 0; i < pages.length; i++) {
+        try {
+          const page = pages[i];
+          const { width, height } = page.getSize();
+          
+          // Get highlights for this page
+          const pageHighlights = pdf.highlights.filter(h => h.page === i + 1);
+          
+          // Process highlights
+          pageHighlights.forEach((highlight, index) => {
+            try {
+              // Get the text content and position from the original PDF
+              const textContent = highlight.text;
+              
+              // Calculate highlight position based on the text selection
+              const textPosition = {
+                x: 50 + (highlight.start * 0.1),
+                y: height - (highlight.start * 0.1),
+                width: (highlight.end - highlight.start) * 0.1,
+                height: 20
+              };
+
+              // Create proper PDF highlight annotation
+              const color = highlight.color || 'yellow';
+              const rgbColor = getRGBColor(color);
+              
+              // First draw the highlight rectangle
+              page.drawRectangle({
+                x: textPosition.x,
+                y: textPosition.y - 2,
+                width: textPosition.width,
+                height: textPosition.height + 4,
+                color: rgbColor,
+                opacity: 0.3,
+                borderColor: rgbColor,
+                borderWidth: 1
+              });
+
+              // Then draw the text on top of the highlight
+              page.drawText(textContent, {
+                x: textPosition.x,
+                y: textPosition.y + 4,
+                size: 12,
+                color: rgb(0, 0, 0),
+                font: helveticaBold,
+                maxWidth: textPosition.width
+              });
+
+              // If there's a comment, draw it right after the highlighted text
+              if (highlight.comment) {
+                const footnoteNumber = index + 1;
+                page.drawText(`${footnoteNumber}.`, {
+                  x: textPosition.x - 5,
+                  y: textPosition.y + 4,
+                  size: 12,
+                  color: rgb(0, 0, 0),
+                  font: helveticaBold
+                });
+
+                page.drawText(`: ${highlight.comment}`, {
+                  x: textPosition.x + textPosition.width + 5,
+                  y: textPosition.y + 4,
+                  size: 12,
+                  color: rgb(0, 0, 0),
+                  font: helveticaFont
+                });
+              }
+            } catch (highlightError) {
+              console.error('Error processing highlight:', highlightError);
+            }
+          });
+
+          // Add footnotes at the bottom
+          if (pageHighlights.some(h => h.comment)) {
+            try {
+              const footerStartY = 100;
+              const footerX = 50;
+              const margin = 50;
+              
+              // Draw separator line
+              page.drawLine({
+                start: { x: margin, y: footerStartY + 20 },
+                end: { x: width - margin, y: footerStartY + 20 },
+                thickness: 1,
+                color: rgb(0.3, 0.3, 0.3)
+              });
+
+              // Add footnotes header
+              page.drawText('Footnotes:', {
+                x: footerX,
+                y: footerStartY,
+                size: 14,
+                color: rgb(0, 0, 0),
+                font: helveticaBold
+              });
+
+              // Add footnotes
+              let currentY = footerStartY - 25;
+              pageHighlights.forEach((highlight, index) => {
+                if (highlight.comment) {
+                  const footnoteNumber = index + 1;
+                  const highlightColor = getRGBColor(highlight.color || 'yellow');
+                  
+                  page.drawText(`${footnoteNumber}. ${highlight.text}:`, {
+                    x: footerX,
+                    y: currentY,
+                    size: 12,
+                    color: highlightColor,
+                    font: helveticaBold,
+                    maxWidth: width - 100
+                  });
+                  
+                  page.drawText(highlight.comment, {
+                    x: footerX + 20,
+                    y: currentY - 20,
+                    size: 12,
+                    color: rgb(0, 0, 0),
+                    font: helveticaFont,
+                    maxWidth: width - 120
+                  });
+                  
+                  currentY -= 45;
+                }
+              });
+
+              // Add page number
+              page.drawText(`Page ${i + 1} of ${pages.length}`, {
+                x: width - 100,
+                y: margin,
+                size: 9,
+                color: rgb(0.5, 0.5, 0.5),
+                font: helveticaFont
+              });
+            } catch (footnoteError) {
+              console.error('Error adding footnotes:', footnoteError);
+            }
+          }
+        } catch (pageError) {
+          console.error('Error processing page:', pageError);
+        }
+      }
+
+      // Save the modified PDF
+      const modifiedPdfBytes = await pdfDoc.save({
+        useObjectStreams: false,
+        addDefaultPage: false,
+        preserveEditability: true
+      });
+      
+      // Store the annotated PDF in S3
+      const annotatedKey = `annotated/${pdf._id}/${Date.now()}-annotated.pdf`;
+      const uploadParams = {
+        Bucket: bucketName,
+        Key: annotatedKey,
+        Body: Buffer.from(modifiedPdfBytes),
+        ContentType: 'application/pdf',
+        ContentDisposition: 'inline'
+      };
+
+      await s3Client.send(new PutObjectCommand(uploadParams));
+      
+      // Generate a signed URL for the annotated PDF
+      const signedUrl = await generateSignedUrl(annotatedKey);
+      
+      // Update the PDF document with the annotated version
+      pdf.annotatedVersion = {
+        url: signedUrl,
+        storagePath: annotatedKey,
+        generatedAt: new Date()
+      };
+      await pdf.save();
+
+      res.json({
+        message: 'Annotated PDF generated successfully',
+        url: signedUrl,
+        pdf: pdf
+      });
+    } catch (s3Error) {
+      console.error('S3 operation failed:', s3Error);
+      return res.status(500).json({ 
+        message: 'Failed to process PDF',
+        error: 'S3_OPERATION_FAILED',
+        details: s3Error.message
+      });
+    }
+  } catch (error) {
+    console.error('Error generating annotated PDF:', error);
+    res.status(500).json({ 
+      message: 'Error generating annotated PDF',
+      error: error.message 
+    });
+  }
+});
+
+// Export annotated PDF
+router.get('/:id/export', auth, async (req, res) => {
+  try {
+    const pdf = await PDF.findById(req.params.id);
+    if (!pdf) {
+      return res.status(404).json({ message: 'PDF not found' });
+    }
+
+    if (!pdf.annotatedVersion?.storagePath) {
+      return res.status(400).json({ 
+        message: 'No annotated version available. Please generate it first.',
+        error: 'NO_ANNOTATED_VERSION'
+      });
+    }
+
+    // Get the annotated PDF from S3
+    const command = new GetObjectCommand({
+      Bucket: bucketName,
+      Key: pdf.annotatedVersion.storagePath,
+    });
+
+    const response = await s3Client.send(command);
+    const pdfBytes = await response.Body.transformToByteArray();
+    
+    // Set response headers
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${pdf.title.replace('.pdf', '')}_annotated.pdf"`);
+    
+    // Send the PDF
+    res.send(Buffer.from(pdfBytes));
+  } catch (error) {
+    console.error('Error exporting PDF:', error);
+    res.status(500).json({ 
+      message: 'Error exporting PDF',
+      error: error.message 
+    });
+  }
+});
+
+// Helper function to split text into lines that fit within a width
+function splitTextIntoLines(text, maxWidth, font, fontSize) {
+  const words = text.split(' ');
+  const lines = [];
+  let currentLine = '';
+
+  words.forEach(word => {
+    const testLine = currentLine ? `${currentLine} ${word}` : word;
+    const testWidth = font.widthOfTextAtSize(testLine, fontSize);
+
+    if (testWidth <= maxWidth) {
+      currentLine = testLine;
+    } else {
+      lines.push(currentLine);
+      currentLine = word;
+    }
+  });
+
+  if (currentLine) {
+    lines.push(currentLine);
+  }
+
+  return lines;
+}
+
+// Helper function to convert color name to RGB
+function getRGBColor(color) {
+  const colors = {
+    yellow: rgb(1, 1, 0),
+    blue: rgb(0, 0, 1),
+    green: rgb(0, 1, 0),
+    red: rgb(1, 0, 0),
+    purple: rgb(0.5, 0, 0.5),
+    pink: rgb(1, 0.4, 0.7),
+    orange: rgb(1, 0.6, 0)
+  };
+  return colors[color] || colors.yellow;
+}
 
 // Get a single PDF
 router.get('/:id', auth, async (req, res) => {
@@ -261,26 +832,7 @@ router.delete('/:id', auth, async (req, res) => {
   }
 });
 
-// Test S3 connection
-router.get('/test-s3', auth, async (req, res) => {
-  try {
-    const command = new GetObjectCommand({
-      Bucket: bucketName,
-      Key: 'test.txt'
-    });
-    await s3Client.send(command);
-    res.json({ 
-      message: 'S3 connection successful',
-      bucket: bucketName,
-      region: process.env.AWS_REGION
-    });
-  } catch (error) {
-    console.error('S3 test error:', error);
-    res.status(500).json({ message: 'S3 connection failed', error: error.message });
-  }
-});
-
-// Highlight routes - moved to top to avoid conflicts
+// Highlight routes
 // Add highlight to PDF
 router.post('/:id/highlights', auth, async (req, res) => {
   try {

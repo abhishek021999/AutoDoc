@@ -5,6 +5,7 @@ import axios from 'axios';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/esm/Page/AnnotationLayer.css';
 import 'react-pdf/dist/esm/Page/TextLayer.css';
+import './PDFViewer.css';
 
 // Set up the worker for PDF.js
 pdfjs.GlobalWorkerOptions.workerSrc = new URL(
@@ -45,6 +46,12 @@ function PDFViewer() {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [highlightedText, setHighlightedText] = useState(null);
   const pageRefs = useRef({});
+  const [exporting, setExporting] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedColors, setSelectedColors] = useState([]);
+  const [filteredHighlights, setFilteredHighlights] = useState([]);
+  const [generating, setGenerating] = useState(false);
+  const [annotatedPdfUrl, setAnnotatedPdfUrl] = useState(null);
 
   // Memoize the PDF options to prevent unnecessary re-renders
   const pdfOptions = useMemo(() => ({
@@ -62,6 +69,27 @@ function PDFViewer() {
       }
     };
   }, [id]);
+
+  useEffect(() => {
+    let filtered = [...highlights];
+
+    // Filter by search query - only in comments
+    if (searchQuery) {
+      const query = searchQuery.toLowerCase();
+      filtered = filtered.filter(highlight => 
+        highlight.comment && highlight.comment.toLowerCase().includes(query)
+      );
+    }
+
+    // Filter by colors
+    if (selectedColors.length > 0) {
+      filtered = filtered.filter(highlight => 
+        selectedColors.includes(highlight.color)
+      );
+    }
+
+    setFilteredHighlights(filtered);
+  }, [highlights, searchQuery, selectedColors]);
 
   const fetchPdf = async () => {
     try {
@@ -142,8 +170,12 @@ function PDFViewer() {
 
       console.log('Add highlight response:', response.data);
 
-      // Add the new highlight to the state
-      setHighlights([...highlights, response.data]);
+      // Add the new highlight to the state with the ID from the response
+      setHighlights(prevHighlights => [...prevHighlights, response.data]);
+
+      // Refresh PDF data to ensure everything is in sync
+      await fetchPdf();
+
       setShowHighlightModal(false);
       setSelectedText('');
       setHighlightComment('');
@@ -156,6 +188,11 @@ function PDFViewer() {
   };
 
   const handleDeleteHighlight = async (highlightId) => {
+    if (!highlightId) {
+      console.error('Invalid highlight ID:', highlightId);
+      return;
+    }
+
     try {
       const token = localStorage.getItem('token');
       console.log('Deleting highlight:', highlightId);
@@ -164,7 +201,7 @@ function PDFViewer() {
       const previousHighlights = [...highlights];
 
       // First remove from state to give immediate feedback
-      setHighlights(highlights.filter(h => h._id !== highlightId));
+      setHighlights(prevHighlights => prevHighlights.filter(h => h._id !== highlightId));
 
       const response = await axios.delete(
         `${import.meta.env.VITE_API_URL}/api/pdfs/${id}/highlights/${highlightId}`,
@@ -183,14 +220,10 @@ function PDFViewer() {
         throw new Error('Failed to delete highlight');
       }
 
-      // Verify the highlight was actually removed
-      if (response.data.removedHighlight) {
-        console.log('Highlight successfully removed:', response.data.removedHighlight);
-        // No need to update state again since we already removed it
-        setError('');
-      } else {
-        throw new Error('Highlight removal not confirmed by server');
-      }
+      // Refresh PDF data
+      await fetchPdf();
+
+      setError('');
     } catch (err) {
       console.error('Error deleting highlight:', err);
       // Revert the state change on error
@@ -256,6 +289,10 @@ function PDFViewer() {
   };
 
   const handleEditHighlight = (highlight) => {
+    if (!highlight || !highlight._id) {
+      console.error('Invalid highlight object:', highlight);
+      return;
+    }
     console.log('Editing highlight:', highlight);
     setEditingHighlight(highlight);
     setHighlightColor(highlight.color || 'yellow');
@@ -266,7 +303,10 @@ function PDFViewer() {
   };
 
   const handleUpdateHighlight = async () => {
-    if (!editingHighlight) return;
+    if (!editingHighlight || !editingHighlight._id) {
+      console.error('Invalid editing highlight:', editingHighlight);
+      return;
+    }
 
     try {
       const token = localStorage.getItem('token');
@@ -294,9 +334,14 @@ function PDFViewer() {
       console.log('Update response:', response.data);
 
       // Update the highlights array with the new data
-      setHighlights(highlights.map(h => 
-        h._id === editingHighlight._id ? { ...h, ...response.data } : h
-      ));
+      setHighlights(prevHighlights => 
+        prevHighlights.map(h => 
+          h._id === editingHighlight._id ? { ...h, ...response.data } : h
+        )
+      );
+
+      // Refresh PDF data
+      await fetchPdf();
 
       setShowEditModal(false);
       setEditingHighlight(null);
@@ -310,65 +355,272 @@ function PDFViewer() {
 
   const navigateToHighlight = (highlight) => {
     console.log('Navigating to highlight:', highlight);
+    
+    // First set the page number
     setPageNumber(highlight.page);
     setHighlightedText(highlight);
-    
-    // Wait for the page to render before scrolling
+
+    // Wait for the page to render
     setTimeout(() => {
-      const pageElement = pageRefs.current[highlight.page];
-      if (pageElement) {
-        console.log('Found page element');
-        // Find the text layer
+      try {
+        // Get the page element
+        const pageElement = pageRefs.current[highlight.page];
+        if (!pageElement) {
+          console.error('Page element not found');
+          return;
+        }
+
+        // Get the text layer
         const textLayer = pageElement.querySelector('.react-pdf__Page__textContent');
-        if (textLayer) {
-          console.log('Found text layer');
-          // Find all text spans
-          const textSpans = textLayer.querySelectorAll('span');
-          console.log('Found spans:', textSpans.length);
-          let foundSpan = null;
-          
-          // Look for the text match
+        if (!textLayer) {
+          console.error('Text layer not found');
+          return;
+        }
+
+        // Get all text spans
+        const textSpans = Array.from(textLayer.querySelectorAll('span'));
+        console.log('Total spans found:', textSpans.length);
+
+        // Find the matching text
+        const highlightText = highlight.text.trim().toLowerCase();
+        let targetSpans = [];
+        let bestMatch = null;
+        let bestMatchScore = 0;
+
+        // First pass: Find the best matching span
+        textSpans.forEach(span => {
+          const spanText = span.textContent.trim().toLowerCase();
+          if (spanText === highlightText) {
+            // Exact match
+            bestMatch = span;
+            bestMatchScore = 1;
+          } else if (spanText.includes(highlightText)) {
+            // Partial match - store for potential use if no exact match is found
+            const matchScore = highlightText.length / spanText.length;
+            if (matchScore > bestMatchScore) {
+              bestMatch = span;
+              bestMatchScore = matchScore;
+            }
+          }
+        });
+
+        // If we found a match, get all spans that are part of the same text block
+        if (bestMatch) {
+          const bestMatchRect = bestMatch.getBoundingClientRect();
+          const bestMatchTop = bestMatchRect.top;
+          const bestMatchBottom = bestMatchRect.bottom;
+          const tolerance = 5; // pixels tolerance for considering spans on the same line
+
           textSpans.forEach(span => {
-            const spanText = span.textContent.trim();
-            const highlightText = highlight.text.trim();
-            console.log('Comparing:', { spanText, highlightText });
-            
-            // More lenient matching - check if the span contains the highlight text
-            if (spanText.includes(highlightText)) {
-              foundSpan = span;
-              console.log('Found matching span:', spanText);
+            const spanRect = span.getBoundingClientRect();
+            // Check if span is on the same line as the best match
+            if (Math.abs(spanRect.top - bestMatchTop) <= tolerance && 
+                Math.abs(spanRect.bottom - bestMatchBottom) <= tolerance) {
+              targetSpans.push(span);
             }
           });
+        }
 
-          if (foundSpan) {
-            console.log('Scrolling to span');
-            // Scroll the highlight into view
-            foundSpan.scrollIntoView({
-              behavior: 'smooth',
-              block: 'center'
+        console.log('Found matching spans:', targetSpans.length);
+
+        // Get the scroll container
+        const scrollContainer = document.querySelector('.col[style*="overflow: auto"]');
+        if (!scrollContainer) {
+          console.error('Scroll container not found');
+          return;
+        }
+
+        // Get the page dimensions
+        const pageRect = pageElement.getBoundingClientRect();
+        const containerRect = scrollContainer.getBoundingClientRect();
+
+        // Calculate the position based on the actual text position
+        let scrollTop;
+        if (bestMatch) {
+          const bestMatchRect = bestMatch.getBoundingClientRect();
+          scrollTop = scrollContainer.scrollTop + 
+            (bestMatchRect.top - containerRect.top) - 
+            (containerRect.height / 2) + 
+            (bestMatchRect.height / 2);
+        } else {
+          // Fallback to percentage-based position if no exact match found
+          const pageHeight = pageRect.height;
+          const highlightPosition = (highlight.start / 100) * pageHeight;
+          scrollTop = scrollContainer.scrollTop + 
+            (pageRect.top - containerRect.top) + 
+            highlightPosition - 
+            (containerRect.height / 2);
+        }
+
+        // Ensure we don't scroll beyond the document boundaries
+        const maxScroll = scrollContainer.scrollHeight - containerRect.height;
+        scrollTop = Math.max(0, Math.min(scrollTop, maxScroll));
+
+        // Ensure the page is fully rendered before scrolling
+        const checkPageRendered = () => {
+          if (pageElement.offsetHeight > 0) {
+            // Page is rendered, now scroll
+            scrollContainer.scrollTo({
+              top: scrollTop,
+              behavior: 'smooth'
             });
 
-            // Add a temporary highlight effect
-            foundSpan.style.backgroundColor = `${HIGHLIGHT_COLORS[highlight.color]}80`;
-            setTimeout(() => {
-              foundSpan.style.backgroundColor = '';
-            }, 4000);
+            // If we found matching spans, highlight them
+            if (targetSpans.length > 0) {
+              // Store original styles for each span
+              const originalStyles = targetSpans.map(span => ({
+                backgroundColor: span.style.backgroundColor,
+                color: span.style.color,
+                transition: span.style.transition
+              }));
+
+              // Apply highlight styles to all matching spans
+              targetSpans.forEach(span => {
+                span.style.backgroundColor = HIGHLIGHT_COLORS[highlight.color];
+                span.style.color = '#000000';
+                span.style.transition = 'all 0.5s ease-in-out';
+              });
+
+              // Remove highlight after 5 seconds
+              setTimeout(() => {
+                targetSpans.forEach((span, index) => {
+                  const original = originalStyles[index];
+                  span.style.backgroundColor = original.backgroundColor;
+                  span.style.color = original.color;
+                  span.style.transition = original.transition;
+                });
+              }, 5000);
+            }
           } else {
-            console.log('No matching span found');
+            // Page not yet rendered, check again after a short delay
+            setTimeout(checkPageRendered, 100);
           }
-        } else {
-          console.log('Text layer not found');
-        }
-      } else {
-        console.log('Page element not found');
+        };
+
+        // Start checking if the page is rendered
+        checkPageRendered();
+
+      } catch (error) {
+        console.error('Error during navigation:', error);
       }
-    }, 500); // Wait for page render
+    }, 500);
   };
+
+  const handleGenerateAnnotated = async () => {
+    try {
+      setGenerating(true);
+      setError('');
+      const token = localStorage.getItem('token');
+      const response = await axios.post(
+        `${import.meta.env.VITE_API_URL}/api/pdfs/${id}/generate-annotated`,
+        {},
+        {
+          headers: { Authorization: `Bearer ${token}` }
+        }
+      );
+      setAnnotatedPdfUrl(response.data.url);
+
+      // Fetch the annotated PDF
+      const pdfResponse = await fetch(response.data.url, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/pdf',
+        },
+        credentials: 'include'
+      });
+
+      if (!pdfResponse.ok) {
+        throw new Error('Failed to fetch annotated PDF content');
+      }
+
+      const pdfBlob = await pdfResponse.blob();
+      
+      if (pdfData) {
+        URL.revokeObjectURL(pdfData);
+      }
+      
+      const blobUrl = URL.createObjectURL(pdfBlob);
+      setPdfData(blobUrl);
+    } catch (err) {
+      console.error('Error generating annotated PDF:', err);
+      setError('Failed to generate annotated PDF. Please try again.');
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const handleExport = async () => {
+    try {
+      setExporting(true);
+      setError('');
+      const token = localStorage.getItem('token');
+      const response = await axios.get(
+        `${import.meta.env.VITE_API_URL}/api/pdfs/${id}/export`,
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          responseType: 'blob'
+        }
+      );
+
+      // Create a download link
+      const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `${pdf.title.replace('.pdf', '')}_annotated.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('Error exporting PDF:', err);
+      setError('Failed to export PDF. Please try again.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  const toggleColorFilter = (color) => {
+    setSelectedColors(prev => 
+      prev.includes(color)
+        ? prev.filter(c => c !== color)
+        : [...prev, color]
+    );
+  };
+
+  const handleMouseDown = (e) => {
+    if (e.button === 0) { // Left mouse button
+      setIsPanning(true);
+      setStartPanPosition({ x: e.clientX, y: e.clientY });
+    }
+  };
+
+  const handleMouseMove = (e) => {
+    if (isPanning) {
+      const deltaX = e.clientX - startPanPosition.x;
+      const deltaY = e.clientY - startPanPosition.y;
+      setPanPosition(prev => ({
+        x: prev.x + deltaX,
+        y: prev.y + deltaY
+      }));
+      setStartPanPosition({ x: e.clientX, y: e.clientY });
+    }
+  };
+
+  const handleMouseUp = () => {
+    setIsPanning(false);
+  };
+
+  useEffect(() => {
+    document.addEventListener('mouseup', handleMouseUp);
+    return () => {
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
 
   const renderSidebar = () => {
     return (
       <div 
-        className="sidebar bg-white" 
+        className="sidebar" 
         style={{ 
           height: '100%',
           overflowY: 'auto',
@@ -411,15 +663,100 @@ function PDFViewer() {
             <h4 className="mb-0">Highlights & Notes</h4>
           </div>
 
-          {highlights.length === 0 ? (
+          {/* Search Bar */}
+          <div className="mb-3 position-relative">
+            <div className="input-group">
+              <span className="input-group-text">
+                <i className="bi bi-chat-left-text text-muted"></i>
+              </span>
+              <Form.Control
+                type="text"
+                placeholder="Search by comments..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                className="ps-0"
+              />
+              {searchQuery && (
+                <span 
+                  className="input-group-text"
+                  style={{ cursor: 'pointer' }}
+                  onClick={() => setSearchQuery('')}
+                >
+                  <i className="bi bi-x text-muted"></i>
+                </span>
+              )}
+            </div>
+            <div 
+              className="position-absolute w-100 mt-1" 
+              style={{ 
+                zIndex: 1000,
+                display: searchQuery ? 'block' : 'none'
+              }}
+            >
+              <div className="bg-white rounded shadow-sm p-2">
+                <small className="text-muted">
+                  {filteredHighlights.length} results found
+                </small>
+              </div>
+            </div>
+          </div>
+
+          {/* Color Filters */}
+          <div className="mb-3">
+            <small className="text-muted d-block mb-2">Filter by color:</small>
+            <div className="d-flex flex-column gap-2">
+              {Object.entries(HIGHLIGHT_COLORS).map(([name, color]) => (
+                <Form.Check
+                  key={name}
+                  type="checkbox"
+                  id={`color-${name}`}
+                  className="color-filter-checkbox"
+                  label={
+                    <div className="d-flex align-items-center">
+                      <div
+                        style={{
+                          width: '20px',
+                          height: '20px',
+                          backgroundColor: color,
+                          border: '1px solid #dee2e6',
+                          borderRadius: '4px',
+                          marginRight: '8px'
+                        }}
+                      />
+                      <span style={{ textTransform: 'capitalize' }}>{name}</span>
+                    </div>
+                  }
+                  checked={selectedColors.includes(name)}
+                  onChange={() => toggleColorFilter(name)}
+                />
+              ))}
+            </div>
+          </div>
+
+          {/* Results count */}
+          <div className="mb-3">
+            <small className="text-muted">
+              {filteredHighlights.length} of {highlights.length} highlights shown
+            </small>
+          </div>
+
+          {filteredHighlights.length === 0 ? (
             <div className="text-center text-muted py-5">
-              <i className="bi bi-highlighter display-4"></i>
-              <p className="mt-3">No highlights yet</p>
-              <small>Select text in the PDF to add highlights</small>
+              <i className="bi bi-search display-4"></i>
+              <p className="mt-3">
+                {highlights.length === 0 
+                  ? "No highlights yet"
+                  : "No highlights match your search"}
+              </p>
+              <small>
+                {highlights.length === 0 
+                  ? "Select text in the PDF to add highlights"
+                  : "Try adjusting your search or filters"}
+              </small>
             </div>
           ) : (
             <ListGroup>
-              {highlights.map((highlight, index) => (
+              {filteredHighlights.map((highlight, index) => (
                 <ListGroup.Item 
                   key={highlight._id || index}
                   className="mb-3 p-3"
@@ -431,7 +768,6 @@ function PDFViewer() {
                     backgroundColor: pageNumber === highlight.page ? '#f8f9fa' : 'white'
                   }}
                   onClick={(e) => {
-                    // Only navigate if the click wasn't on a button
                     if (!e.target.closest('.btn')) {
                       navigateToHighlight(highlight);
                     }
@@ -454,17 +790,35 @@ function PDFViewer() {
                         </small>
                       </div>
                       
-                      <div className="highlight-text mb-2 p-2 rounded" 
-                        style={{ 
+                      <div 
+                        className="highlight-text mb-2 p-2 rounded"
+                        data-color={highlight.color}
+                        style={{
+                          wordBreak: 'break-word',
+                          whiteSpace: 'pre-wrap',
+                          maxHeight: '150px',
+                          overflowY: 'auto',
                           backgroundColor: `${HIGHLIGHT_COLORS[highlight.color]}40`,
-                          border: `1px solid ${HIGHLIGHT_COLORS[highlight.color]}80`
+                          fontSize: '0.9rem',
+                          borderLeft: `4px solid ${HIGHLIGHT_COLORS[highlight.color]}`
                         }}
                       >
                         {highlight.text}
                       </div>
 
                       {highlight.comment && (
-                        <div className="highlight-comment mt-2 p-2 bg-light rounded">
+                        <div 
+                          className="highlight-comment mt-2 p-2 rounded"
+                          style={{
+                            wordBreak: 'break-word',
+                            whiteSpace: 'pre-wrap',
+                            maxHeight: '100px',
+                            overflowY: 'auto',
+                            backgroundColor: `${HIGHLIGHT_COLORS[highlight.color]}20`,
+                            fontSize: '0.9rem',
+                            borderLeft: `4px solid ${HIGHLIGHT_COLORS[highlight.color]}`
+                          }}
+                        >
                           <small className="text-muted d-block mb-1">
                             <i className="bi bi-chat-left-text me-1"></i>
                             Comment
@@ -482,7 +836,11 @@ function PDFViewer() {
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
-                          handleEditHighlight(highlight);
+                          console.log('Edit button clicked for highlight:', highlight);
+                          setEditingHighlight(highlight);
+                          setHighlightColor(highlight.color || 'yellow');
+                          setHighlightComment(highlight.comment || '');
+                          setShowEditModal(true);
                         }}
                         title="Edit highlight"
                       >
@@ -561,146 +919,194 @@ function PDFViewer() {
   }
 
   return (
-    <div style={{ 
-      position: 'fixed',
-      top: '56px',
-      left: 0,
-      right: 0,
-      bottom: 0,
-      overflow: 'hidden',
-      zIndex: 1
-    }}>
-      <Container fluid className="p-0 h-100">
-        <Row className="g-0 h-100" style={{ 
-          overflow: 'hidden'
+    <Container fluid className="pdf-container">
+      <Row className="g-0 h-100" style={{ 
+        overflow: 'hidden'
+      }}>
+        <Col style={{ 
+          width: isSidebarCollapsed ? '50px' : '300px',
+          transition: 'all 0.3s ease',
+          flex: '0 0 auto',
+          height: '100%',
+          position: 'fixed',
+          left: 0,
+          top: '56px',
+          zIndex: 2,
+          backgroundColor: 'white',
+          borderRight: '1px solid #dee2e6',
+          overflowY: 'auto'
         }}>
-          <Col style={{ 
-            width: isSidebarCollapsed ? '50px' : '300px',
-            transition: 'all 0.3s ease',
-            flex: '0 0 auto',
-            height: '100%',
-            position: 'fixed',
-            left: 0,
-            top: '56px',
-            zIndex: 2,
-            backgroundColor: 'white',
-            borderRight: '1px solid #dee2e6',
-            overflowY: 'auto'
-          }}>
-            {renderSidebar()}
-          </Col>
-          <Col style={{ 
-            transition: 'all 0.3s ease',
-            flex: '1 1 auto',
-            width: isSidebarCollapsed ? 'calc(100% - 50px)' : 'calc(100% - 300px)',
-            marginLeft: isSidebarCollapsed ? '50px' : '300px',
-            height: '100%',
-            overflow: 'auto',
-            backgroundColor: '#f8f9fa',
-            position: 'fixed',
-            top: '56px',
-            right: 0,
-            zIndex: 2
-          }}>
-            <div className="pdf-container p-3">
-              {loading ? (
-                <div className="text-center py-5">
-                  <Spinner animation="border" role="status">
-                    <span className="visually-hidden">Loading...</span>
-                  </Spinner>
-                </div>
-              ) : error ? (
-                <Alert variant="danger">{error}</Alert>
-              ) : (
-                <div className="pdf-viewer">
-                  <div className="pdf-controls bg-white py-2" style={{ 
-                    zIndex: 1030,
-                    borderBottom: '1px solid #dee2e6',
-                    position: 'fixed',
-                    top: '56px',
-                    left: isSidebarCollapsed ? '50px' : '300px',
-                    right: 0,
-                    padding: '0.5rem 1rem',
-                    boxShadow: '0 2px 4px rgba(0,0,0,0.05)'
-                  }}>
-                    <div className="d-flex justify-content-between align-items-center">
-                      <div className="d-flex align-items-center">
+          {renderSidebar()}
+        </Col>
+        <Col style={{ 
+          transition: 'all 0.3s ease',
+          flex: '1 1 auto',
+          width: isSidebarCollapsed ? 'calc(100% - 50px)' : 'calc(100% - 300px)',
+          marginLeft: isSidebarCollapsed ? '50px' : '300px',
+          height: '100%',
+          overflow: 'auto',
+          backgroundColor: '#f8f9fa',
+          position: 'fixed',
+          top: '56px',
+          right: 0,
+          zIndex: 2
+        }}>
+          <div className="pdf-container p-3">
+            {loading ? (
+              <div className="text-center py-5">
+                <Spinner animation="border" role="status">
+                  <span className="visually-hidden">Loading...</span>
+                </Spinner>
+              </div>
+            ) : error ? (
+              <Alert variant="danger">{error}</Alert>
+            ) : (
+              <div className="pdf-viewer" style={{ marginBottom: '100px' }}>
+                <div className="pdf-controls bg-white py-2" style={{ 
+                  zIndex: 1030,
+                  borderBottom: '1px solid #dee2e6',
+                  position: 'fixed',
+                  top: '56px',
+                  left: isSidebarCollapsed ? '50px' : '300px',
+                  right: 0,
+                  padding: '0.5rem 1rem',
+                  boxShadow: '0 2px 4px rgba(0,0,0,0.05)'
+                }}>
+                  <div className="d-flex justify-content-between align-items-center">
+                    <div className="d-flex align-items-center">
+                      <Button
+                        variant="outline-primary"
+                        size="sm"
+                        onClick={() => setPageNumber(page => Math.max(1, page - 1))}
+                        disabled={pageNumber <= 1}
+                      >
+                        <i className="bi bi-chevron-left"></i>
+                      </Button>
+                      <span className="mx-3">
+                        Page {pageNumber} of {numPages}
+                      </span>
+                      <Button
+                        variant="outline-primary"
+                        size="sm"
+                        onClick={() => setPageNumber(page => Math.min(numPages, page + 1))}
+                        disabled={pageNumber >= numPages}
+                      >
+                        <i className="bi bi-chevron-right"></i>
+                      </Button>
+                    </div>
+                    <div className="d-flex align-items-center">
+                      <Button
+                        variant="outline-secondary"
+                        size="sm"
+                        onClick={() => setScale(s => Math.max(0.5, s - 0.1))}
+                      >
+                        <i className="bi bi-zoom-out"></i>
+                      </Button>
+                      <span className="mx-2">{Math.round(scale * 100)}%</span>
+                      <Button
+                        variant="outline-secondary"
+                        size="sm"
+                        onClick={() => setScale(s => Math.min(2, s + 0.1))}
+                      >
+                        <i className="bi bi-zoom-in"></i>
+                      </Button>
+                      <div className="ms-3 d-flex gap-2">
                         <Button
                           variant="outline-primary"
                           size="sm"
-                          onClick={() => setPageNumber(page => Math.max(1, page - 1))}
-                          disabled={pageNumber <= 1}
+                          onClick={handleGenerateAnnotated}
+                          disabled={generating}
                         >
-                          <i className="bi bi-chevron-left"></i>
+                          {generating ? (
+                            <>
+                              <Spinner
+                                as="span"
+                                animation="border"
+                                size="sm"
+                                role="status"
+                                aria-hidden="true"
+                                className="me-2"
+                              />
+                              Generating...
+                            </>
+                          ) : (
+                            <>
+                              <i className="bi bi-file-earmark-text me-2"></i>
+                              Generate Annotated PDF
+                            </>
+                          )}
                         </Button>
-                        <span className="mx-3">
-                          Page {pageNumber} of {numPages}
-                        </span>
                         <Button
-                          variant="outline-primary"
+                          variant="primary"
                           size="sm"
-                          onClick={() => setPageNumber(page => Math.min(numPages, page + 1))}
-                          disabled={pageNumber >= numPages}
+                          onClick={handleExport}
+                          disabled={exporting || !annotatedPdfUrl}
                         >
-                          <i className="bi bi-chevron-right"></i>
-                        </Button>
-                      </div>
-                      <div className="d-flex align-items-center">
-                        <Button
-                          variant="outline-secondary"
-                          size="sm"
-                          onClick={() => setScale(s => Math.max(0.5, s - 0.1))}
-                        >
-                          <i className="bi bi-zoom-out"></i>
-                        </Button>
-                        <span className="mx-2">{Math.round(scale * 100)}%</span>
-                        <Button
-                          variant="outline-secondary"
-                          size="sm"
-                          onClick={() => setScale(s => Math.min(2, s + 0.1))}
-                        >
-                          <i className="bi bi-zoom-in"></i>
+                          {exporting ? (
+                            <>
+                              <Spinner
+                                as="span"
+                                animation="border"
+                                size="sm"
+                                role="status"
+                                aria-hidden="true"
+                                className="me-2"
+                              />
+                              Exporting...
+                            </>
+                          ) : (
+                            <>
+                              <i className="bi bi-download me-2"></i>
+                              Download PDF
+                            </>
+                          )}
                         </Button>
                       </div>
                     </div>
                   </div>
-
-                  <div 
-                    className="pdf-document mt-4"
-                    onMouseUp={handleTextSelection}
-                  >
-                    <Document
-                      file={pdfData}
-                      onLoadSuccess={onDocumentLoadSuccess}
-                      onLoadError={onDocumentLoadError}
-                      options={pdfOptions}
-                      loading={
-                        <div className="text-center py-5">
-                          <Spinner animation="border" role="status">
-                            <span className="visually-hidden">Loading PDF...</span>
-                          </Spinner>
-                        </div>
-                      }
-                    >
-                      <Page
-                        pageNumber={pageNumber}
-                        scale={scale}
-                        renderTextLayer={true}
-                        renderAnnotationLayer={true}
-                        inputRef={el => {
-                          if (el) {
-                            pageRefs.current[pageNumber] = el;
-                          }
-                        }}
-                      />
-                    </Document>
-                  </div>
                 </div>
-              )}
-            </div>
-          </Col>
-        </Row>
-      </Container>
+
+                <div 
+                  className="pdf-document mt-4"
+                  onMouseUp={handleTextSelection}
+                >
+                  <Document
+                    file={pdfData}
+                    onLoadSuccess={onDocumentLoadSuccess}
+                    onLoadError={onDocumentLoadError}
+                    options={pdfOptions}
+                    loading={
+                      <div className="text-center py-5">
+                        <Spinner animation="border" role="status">
+                          <span className="visually-hidden">Loading PDF...</span>
+                        </Spinner>
+                      </div>
+                    }
+                  >
+                    <Page
+                      pageNumber={pageNumber}
+                      scale={scale}
+                      renderTextLayer={true}
+                      renderAnnotationLayer={true}
+                      inputRef={el => {
+                        if (el) {
+                          pageRefs.current[pageNumber] = el;
+                        }
+                      }}
+                      onRenderSuccess={() => {
+                        console.log('Page rendered successfully:', pageNumber);
+                      }}
+                      onRenderError={(error) => {
+                        console.error('Error rendering page:', error);
+                      }}
+                    />
+                  </Document>
+                </div>
+              </div>
+            )}
+          </div>
+        </Col>
+      </Row>
 
       {/* Highlight Modal */}
       <Modal show={showHighlightModal} onHide={() => setShowHighlightModal(false)}>
@@ -823,7 +1229,7 @@ function PDFViewer() {
           </Button>
         </Modal.Footer>
       </Modal>
-    </div>
+    </Container>
   );
 }
 

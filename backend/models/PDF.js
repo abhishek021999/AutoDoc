@@ -56,6 +56,10 @@ const pdfSchema = new mongoose.Schema({
     type: Number,
     required: true
   },
+  pageCount: {
+    type: Number,
+    required: true
+  },
   uploadDate: {
     type: Date,
     default: Date.now
