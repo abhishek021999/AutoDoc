@@ -86,7 +86,7 @@ JWT_SECRET=your_jwt_secret_key_here
 AWS_ACCESS_KEY_ID=your_aws_access_key
 AWS_SECRET_ACCESS_KEY=your_aws_secret_key
 AWS_REGION=your_aws_region
-AWS_BUCKET_NAME=your_s3_bucket_name
+AWS_BUCKET_NAME=your_s3_bucket_nameei
 ```
 
 Frontend (.env):
